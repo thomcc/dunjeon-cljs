@@ -9,7 +9,7 @@
 ;;************************************************
 ;; Dev stuff
 ;;************************************************
-
+(set! *print-fn* (fn [& args] (dorun (map #(.log js/console %) args))))
 (watcher/init)
 ;(repl/connect "http://localhost:9000/repl")
 
@@ -28,12 +28,15 @@
 (defn abssq [[x y]] (+ (* x x) (* y y)))
 (defn dist [p0 p1] (abssq (map - p0 p1)))
 
-
-
-(def char-rep {:floor ".", nil "#", :stairs ">", :gold "$", :booze "!",:player "@", :monster "m"})
-
-(def color-rep {:floor "white", nil "gray", :stairs "orange", :gold "yellow", :booze "magenta", :monster "red",
-                :player "green"})
+(defrecord Tile-lookup [floor wall stairs gold booze player monster])
+(def char-rep (Tile-lookup. "." "#" ">" "$" "!" "@" "m"))
+(def color-rep (Tile-lookup. "white" "gray" "orange" "yellow" "magenta" "#0f0" "red"))
+(def mem-color-rep (Tile-lookup. "gray" "#333" "#8c4618" "#9c9c618" "#640064" "#0f0" "#800000"))
+;; (def char-rep {:floor ".", nil "#", :stairs ">", :gold "$", :booze "!",:player "@", :monster "m"})
+;; (def color-rep {:floor "white", nil "gray", :stairs "orange", :gold "yellow", :booze "magenta", :monster "red",
+;;                 :player "green"})
+;; (def mem-color-rep {:floor "gray", :stairs "#8c4618", :booze "#640064" nil "#333", :gold "#9c9618", :monster "#800000"
+;;                     :player "#408000"})
 
 (def auto-use #{:gold, :booze})
 
@@ -103,7 +106,6 @@
   (add-monsters (reduce (fn [lvl [item, num-fn]] (place-randomly lvl (num-fn) item)) level distributions)
                 (random 5 5)))
 
-
 (defn gen-level [width height rooms]
   (-> (empty-map width height) (add-rooms rooms) connect-rooms levelify-map finalize))
 
@@ -138,7 +140,7 @@
          :player {:pos ((rand-elt (:points level)) 0),:health 50, :sees #{} :score 0, :level 0, :dead false}
          :messages ()}
         update-vision
-        (add-msg "blue" "(entering (dungeon))")
+        (add-msg "(entering (dungeon))")
         (add-msg "Entered level 0."))))
 
 (defmulti use-tile (fn [gs pos item] item))
@@ -192,7 +194,9 @@
           :else (assoc-in gs [:player :pos] newpos))))
 
 (defn die [{{:keys [level score]} :player :as gs}]
-  (-> gs (assoc-in [:player :dead] true) (assoc-in [:player :health] 0)
+  (-> gs
+      (assoc-in [:player :dead] true)
+      (assoc-in [:player :health] 0)
       (add-msg "red" (str "You have died on level " level " with " score " points."))
       (add-msg "red" "Press enter to try again.")))
 
@@ -201,8 +205,9 @@
       (let [dam (random (+ l 3) (+ l 7))
             next-gs (-> gs (update-in [:player :health] - dam)
                         (add-msg (str "The monster attacks you for " dam " damage!")))]
-        (if-not (pos? (- (:health (:player gs)) dam)) (die (assoc-in next-gs [:player :dead] true))
-                next-gs))))
+        (if-not (pos? (- (:health (:player gs)) dam))
+          (die (assoc-in next-gs [:player :dead] true))
+          next-gs))))
 
 (defn tick-monster [{{ms :monsters pts :points :as lvl} :level {pp :pos} :player :as gs} {mp :pos :as mon}]
   (let [vis (can-see? lvl mp pp),
@@ -221,9 +226,6 @@
 
 (def game (atom (initialize-gamestate)))
 
-
-
-
 (def $content ($ :#content))
 
 (defpartial canv [] [:canvas#canvas {:width canv-width :height canv-height}])
@@ -238,45 +240,40 @@
 (defn draw [{{[px py :as pos] :pos h :health s :score sees :sees, lv :level :as play} :player,
              {:keys [points width height monsters seen]} :level, msgs :messages}]
   (set! (.-font ctx) "12px monospace")
-  (doto ctx
-    (set-fill "black")
-    (.fillRect 0 0 canv-width canv-height))
+  (doto ctx (set-fill "black") (.fillRect 0 0 canv-width canv-height))
   (let [mpts (set (map :pos monsters))]
-    (doseq [xx (range width), yy (range height)]
-      (let [p [xx yy], type (cond (= p pos) :player, (mpts p) :monster :else (points p)),
-            ch (char-rep type), co (color-rep type)]
-        (doto ctx (set-fill co) (.fillText ch (* xx 11) (* yy 11)))))))
+    (loop [yy (dec height)]
+      (when-not (neg? yy)
+        (loop [xx (dec width)]
+          (when-not (neg? xx)
+            (let [p [xx yy]
+                  typ (or (cond (= p pos) :player
+                                (mpts p) :monster
+                                :else (points p))
+                          :wall)
+                  ch (typ char-rep)
+                  co (cond (not (seen p)) "black"
+                           (not (sees p)) (typ mem-color-rep)
+                           :else (typ color-rep))]
+              (doto ctx
+                (set-fill co)
+                (.fillText ch (* xx 11) (* yy 11)))
+              (recur (dec xx)))))
+        (recur (dec yy))))))
 
 (def key-table {[:move :east] #{39}, [:move :west] #{37}, [:move :north] #{38}, [:move :south] #{40}, [:action] #{13}})
 
 (defn comprehend [code] (first (for [[key codes] key-table :when (codes code)] key)))
 
 (bind ($ js/window) :keydown
-      (fn [e] (.log js/console e) (when-let [input (comprehend (.-keyCode e))]
-                
+      (fn [e] (when-let [input (comprehend (.-keyCode e))]
+                (.preventDefault e)
                 (swap! game tick input)
                 (draw @game))))
 
+;(.log js/console (time (reduce (fn [game _] (draw game) game) @game (range 100))))
 
 (draw @game)
-
-;(def l (gen-level 50 50 (random 4 5)))
-
-;(.log js/console l)
-
-
-
-
-
-(defn draw-level [{:keys [points width height monsters] :as lvl}]
-  (let [mpts (set (map :pos monsters))]
-    (.log js/console monsters)
-    (doseq [xx (range width), yy (range height)]
-      (let [p [xx yy], type (if (mpts p) :monster (points p)), ch (char-rep type), co (color-rep type)]
-        (doto ctx (set-fill co) (.fillText ch (* xx 11) (* yy 11)))))))
-
-;(draw-level l)
-
 
 
 
