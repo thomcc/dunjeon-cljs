@@ -3,7 +3,7 @@
             [clojure.browser.repl :as repl]
             [crate.core :as crate]
             [goog.array :as array])
-  (:use [jayq.core :only [$ append]])
+  (:use [jayq.core :only [$ append bind]])
   (:use-macros [crate.macros :only [defpartial]]))
 
 ;;************************************************
@@ -19,14 +19,14 @@
 
 (def game-width 50)
 (def game-height 50)
-(def canv-width (* 11 (+ 2 game-width)))
-(def canv-height (* 11 (+ 2 game-height)))
+(def canv-width (* 11 game-width))
+(def canv-height (* 11 game-height))
 
 (defn random [min range] (+ min (rand-int range)))
 (defn rand-elt [set] (rand-nth (vec set)))
 (defn signum [x] (if (zero? x) x (if (pos? x) 1 -1)))
 (defn abssq [[x y]] (+ (* x x) (* y y)))
-(defn dist [p0 p1] (abssq (map - p0 p1))) ; really dist^2
+(defn dist [p0 p1] (abssq (map - p0 p1)))
 
 
 
@@ -107,6 +107,120 @@
 (defn gen-level [width height rooms]
   (-> (empty-map width height) (add-rooms rooms) connect-rooms levelify-map finalize))
 
+(defn can-see? [{pts :points} source end]
+  (or (= source end)
+      (let [dest (map #(+ %2 (/ (signum (- % %2)) 2.0)) source end)
+            [distx disty :as dist] (map - dest source)
+            length (max (Math/abs distx) (Math/abs disty))
+            delta (map #(/ % length) dist)]
+        (loop [len length, pos source]
+          (or (neg? len)
+              (let [moved (map (comp Math/floor (partial + 0.5)) pos)]
+                (cond (= moved dest) true
+                      (and (not (= moved source)) (not (pts moved))) false
+                      :else (recur (dec len) (map + delta pos)))))))))
+
+(defn update-vision [{{seen :seen :as lvl} :level,{[x y] :pos :as player} :player :as game-state}]
+  (let [visible (for [xx (range -10 10), yy (range -10 10)
+                      :when (and (<= (abssq [xx yy]) 100) (can-see? lvl [x y] [(+ x xx) (+ y yy)]))]
+                  [(+ xx x) (+ yy y)])]
+    (-> game-state
+        (assoc-in [:level :seen] (reduce conj seen visible))
+        (assoc-in [:player :sees] (set visible)))))
+
+(defn add-msg
+  ([gs msg] (add-msg gs "white" msg))
+  ([gs col msg] (update-in gs [:messages] conj {:col col :txt msg})))
+
+(defn initialize-gamestate []
+  (let [level (gen-level game-width game-height (random 5 4))]
+    (-> {:level level
+         :player {:pos ((rand-elt (:points level)) 0),:health 50, :sees #{} :score 0, :level 0, :dead false}
+         :messages ()}
+        update-vision
+        (add-msg "blue" "(entering (dungeon))")
+        (add-msg "Entered level 0."))))
+
+(defmulti use-tile (fn [gs pos item] item))
+(defmethod use-tile :default [gs _ _] gs)
+(defmethod use-tile ::floor [gs _ _] gs)
+(defmethod use-tile ::booze [{{h :health l :level} :player :as game-state} pos _]
+  (let [healed (random 8 8), hnow (min (+ (* 5 l) 50) (+ h healed)), del (- hnow h)]
+    (-> game-state
+        (clear-tile pos)
+        (assoc-in [:player :health] hnow)
+        (add-msg (str "The booze heals you for " (if (zero? del) "no" del) " points.")))))
+
+(defmethod use-tile ::gold [game-state pos _]
+  (-> game-state
+      (clear-tile pos)
+      (update-in [:player :score] + 25)
+      (add-msg (str "You find 25 gold on the ground. Score!"))))
+
+(defmethod use-tile ::stairs [{p :player :as game-state} _ _]
+  (let [next-floor (gen-level 50 50 (random 4 5))]
+    (-> game-state
+        (assoc :level next-floor)
+        (assoc-in [:player :pos] ((rand-elt (:points next-floor)) 0))
+        (update-in [:player :level] inc)
+        (add-msg "You go down the stairs."))))
+
+(defn fight-pm [{{ms :monsters} :level :as gs} {h :health :as mon}]
+  (let [d (random 3 5), left (- h d), damaged (assoc mon :health left), alive? (pos? left), ms (disj ms mon)]
+    (-> gs
+        (assoc-in [:level :monsters] (if alive? (conj ms damaged) ms))
+        (add-msg (str "The monster " (if alive? (str "takes " d " damage.") "dies.")))
+        (update-in [:player :score] + (if alive? 0 (random 25 25))))))
+
+
+(defn monster-at [{{mons :monsters} :level} pos]
+  (loop [[{p :pos :as m} & ms] (seq mons)]
+    (cond (= p pos) m, (not ms) nil, :else (recur ms))))
+
+(defn autoheal [{{l :level h :health} :player :as gs}]
+  (if (and (< h 50) (zero? (rand-int 5))) (update-in gs [:player :health] + (rand-int (+ l 3))) gs))
+
+(defmulti tick-player (fn [gamestate [kind & args]] kind))
+(defmethod tick-player :default [game-state _] game-state)
+(defmethod tick-player :action [{{p :pos} :player, {pts :points} :level :as gs} _] (use-tile gs p (pts p)))
+
+(defmethod tick-player :move [{{pos :pos h :health} :player, level :level :as gs} [_ dir]]
+  (let [newpos (map + pos (directions dir)), tile ((:points level) newpos), mon (monster-at gs newpos)]
+    (cond (not tile) gs
+          mon (fight-pm gs mon)
+          (auto-use tile) (use-tile (assoc-in gs [:player :pos] newpos) newpos tile)
+          :else (assoc-in gs [:player :pos] newpos))))
+
+(defn die [{{:keys [level score]} :player :as gs}]
+  (-> gs (assoc-in [:player :dead] true) (assoc-in [:player :health] 0)
+      (add-msg "red" (str "You have died on level " level " with " score " points."))
+      (add-msg "red" "Press enter to try again.")))
+
+(defn attack-player [{{l :level h :health :as player} :player :as gs}]
+  (if (zero? (rand-int 4)) (add-msg gs "You dodge the monster's attack!")
+      (let [dam (random (+ l 3) (+ l 7))
+            next-gs (-> gs (update-in [:player :health] - dam)
+                        (add-msg (str "The monster attacks you for " dam " damage!")))]
+        (if-not (pos? (- (:health (:player gs)) dam)) (die (assoc-in next-gs [:player :dead] true))
+                next-gs))))
+
+(defn tick-monster [{{ms :monsters pts :points :as lvl} :level {pp :pos} :player :as gs} {mp :pos :as mon}]
+  (let [vis (can-see? lvl mp pp),
+        del (if vis (map (comp signum -) pp mp) (rand-nth (vals directions))),
+        pos (map + mp del)]
+    (cond (= pos pp) (attack-player gs)
+          (pts pos) (-> gs (update-in [:level :monsters] disj mon) (update-in [:level :monsters] conj (assoc mon :pos pos)))
+          :else gs)))
+
+(defn tick-monsters [{{ms :monsters, pts :points} :level {pp :pos} :player :as gs}] (reduce tick-monster gs ms))
+
+(defn tick [{{dead? :dead} :player :as game-state} input]
+  (cond (not dead?) (-> game-state (tick-player input) autoheal tick-monsters update-vision)
+        (and dead? (= input [:action])) (initialize-gamestate)
+        :else game-state))
+
+(def game (atom (initialize-gamestate)))
+
 
 
 
@@ -117,16 +231,42 @@
 (append $content (canv))
 
 (def cvs (.get ($ :#canvas) 0))
-
 (def ctx (.getContext cvs "2d"))
 
-(def l (gen-level 50 50 (random 4 5)))
-
-(.log js/console l)
-
-(set! (.-font ctx) "12px monospace")
-
 (defn- set-fill [ctx col] (set! (.-fillStyle ctx) col))
+
+(defn draw [{{[px py :as pos] :pos h :health s :score sees :sees, lv :level :as play} :player,
+             {:keys [points width height monsters seen]} :level, msgs :messages}]
+  (set! (.-font ctx) "12px monospace")
+  (doto ctx
+    (set-fill "black")
+    (.fillRect 0 0 canv-width canv-height))
+  (let [mpts (set (map :pos monsters))]
+    (doseq [xx (range width), yy (range height)]
+      (let [p [xx yy], type (cond (= p pos) :player, (mpts p) :monster :else (points p)),
+            ch (char-rep type), co (color-rep type)]
+        (doto ctx (set-fill co) (.fillText ch (* xx 11) (* yy 11)))))))
+
+(def key-table {[:move :east] #{39}, [:move :west] #{37}, [:move :north] #{38}, [:move :south] #{40}, [:action] #{13}})
+
+(defn comprehend [code] (first (for [[key codes] key-table :when (codes code)] key)))
+
+(bind ($ js/window) :keydown
+      (fn [e] (.log js/console e) (when-let [input (comprehend (.-keyCode e))]
+                
+                (swap! game tick input)
+                (draw @game))))
+
+
+(draw @game)
+
+;(def l (gen-level 50 50 (random 4 5)))
+
+;(.log js/console l)
+
+
+
+
 
 (defn draw-level [{:keys [points width height monsters] :as lvl}]
   (let [mpts (set (map :pos monsters))]
@@ -135,7 +275,8 @@
       (let [p [xx yy], type (if (mpts p) :monster (points p)), ch (char-rep type), co (color-rep type)]
         (doto ctx (set-fill co) (.fillText ch (* xx 11) (* yy 11)))))))
 
-(draw-level l)
+;(draw-level l)
+
 
 
 
