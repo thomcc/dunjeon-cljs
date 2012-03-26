@@ -11,7 +11,7 @@
 ;; Dev stuff
 ;;************************************************
 (set! *print-fn* (fn [& args] (dorun (map #(.log js/console %) args))))
-(watcher/init)
+;(watcher/init)
 ;(repl/connect "http://localhost:9000/repl")
 
 ;;************************************************
