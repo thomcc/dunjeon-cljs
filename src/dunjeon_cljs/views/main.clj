@@ -4,5 +4,11 @@
         [hiccup.core :only [html]]))
 
 (defpage "/" []
-         (common/layout
-           [:div#content]))
+  (common/layout
+   [:div#content
+    [:div#wrapper
+     [:h1 "(dunjeon)"]
+     [:div.clearfix
+      [:canvas#canvas {:width 550, :height 550}]
+      [:div#status]]
+     [:div.msgs]]]))

@@ -1,9 +1,10 @@
 (ns dunjeon-cljs.client.main
+  (:refer-clojure :exclude [find])
   (:require [noir.cljs.client.watcher :as watcher]
             [clojure.browser.repl :as repl]
             [crate.core :as crate]
             [goog.array :as array])
-  (:use [jayq.core :only [$ append bind]])
+  (:use [jayq.core :only [$ append bind inner hide find prepend]])
   (:use-macros [crate.macros :only [defpartial]]))
 
 ;;************************************************
@@ -17,6 +18,8 @@
 ;; Code
 ;;************************************************
 
+(declare add-msg)
+
 (def game-width 50)
 (def game-height 50)
 (def canv-width (* 11 game-width))
@@ -29,7 +32,9 @@
 (defn dist [p0 p1] (abssq (map - p0 p1)))
 
 (defrecord Tile-lookup [floor wall stairs gold booze player monster])
+
 (def char-rep (Tile-lookup. "." "#" ">" "$" "!" "@" "m"))
+
 (def color-rep (Tile-lookup. "white" "gray" "orange" "yellow" "magenta" "#0f0" "red"))
 (def mem-color-rep (Tile-lookup. "gray" "#333" "#8c4618" "#9c9c618" "#640064" "#0f0" "#800000"))
 ;; (def char-rep {:floor ".", nil "#", :stairs ">", :gold "$", :booze "!",:player "@", :monster "m"})
@@ -86,28 +91,44 @@
   (mapcat (fn [[row y]] (map #(vector % y) row))
           (partition 2 (interleave (repeat height (range x (+ x width)))
                                    (range y (+ y height))))))
+(defrecord Level [width height seen points tiles])
 
 (defn levelify-map [{:keys [width, height, rooms, paths]}]
-  {:width width, :height height, :seen #{},
-   :points (merge (zipmap (mapcat pointify rooms) (repeat :floor))
-                  (zipmap (apply concat paths) (repeat :floor)))})
+  (let [ps (merge (zipmap (mapcat pointify rooms) (repeat :floor)) (zipmap (apply concat paths) (repeat :floor)))
+        ary (array)]
+    (loop [y 0]
+      (when (< y height)
+        (let [row (array)]
+          (loop [x 0]
+            (when (< x width)
+              (let [t (or (ps [x y]) wall)]
+                (aset row x t)
+                (recur (inc x)))))
+          (aset ary y row)
+          (recur (inc y)))))
+    (Level. width height #{} ps ary)))
+
 
 (defn place-randomly [level n tile]
   (reduce (fn [{p :points :as l} t] (assoc-in l [:points ((rand-elt p) 0)] t))
           level (repeat n tile)))
 
-(defn make-monster [pos] {:pos pos, :health 10})
+(defrecord Monster [pos health])
+
+(defn make-monster [pos] (Monster. pos 10))
 
 (defn add-monsters [{:keys [points] :as level} n]
   (assoc level :monsters (set (map make-monster (map #(% 0) (take n (shuffle points)))))))
 
 
 (defn finalize [level]
-  (add-monsters (reduce (fn [lvl [item, num-fn]] (place-randomly lvl (num-fn) item)) level distributions)
-                (random 5 5)))
+  (add-monsters (reduce (fn [lvl [item, num-fn]] (place-randomly lvl (num-fn) item)) level distributions) (random 5 5)))
 
 (defn gen-level [width height rooms]
   (-> (empty-map width height) (add-rooms rooms) connect-rooms levelify-map finalize))
+
+
+;; vision
 
 (defn can-see? [{pts :points} source end]
   (or (= source end)
@@ -130,36 +151,34 @@
         (assoc-in [:level :seen] (reduce conj seen visible))
         (assoc-in [:player :sees] (set visible)))))
 
-(defn add-msg
-  ([gs msg] (add-msg gs "white" msg))
-  ([gs col msg] (update-in gs [:messages] conj {:col col :txt msg})))
+(defrecord GameState [level player messages])
+
+(defrecord Player [pos health sees score level dead])
 
 (defn initialize-gamestate []
   (let [level (gen-level game-width game-height (random 5 4))]
-    (-> {:level level
-         :player {:pos ((rand-elt (:points level)) 0),:health 50, :sees #{} :score 0, :level 0, :dead false}
-         :messages ()}
+    (-> (GameState. level (Player. ((rand-elt (:points level)) 0), 50, #{} 0 0 false) ())
         update-vision
         (add-msg "(entering (dungeon))")
         (add-msg "Entered level 0."))))
 
 (defmulti use-tile (fn [gs pos item] item))
 (defmethod use-tile :default [gs _ _] gs)
-(defmethod use-tile ::floor [gs _ _] gs)
-(defmethod use-tile ::booze [{{h :health l :level} :player :as game-state} pos _]
+(defmethod use-tile :floor [gs _ _] gs)
+(defmethod use-tile :booze [{{h :health l :level} :player :as game-state} pos _]
   (let [healed (random 8 8), hnow (min (+ (* 5 l) 50) (+ h healed)), del (- hnow h)]
     (-> game-state
         (clear-tile pos)
         (assoc-in [:player :health] hnow)
         (add-msg (str "The booze heals you for " (if (zero? del) "no" del) " points.")))))
 
-(defmethod use-tile ::gold [game-state pos _]
+(defmethod use-tile :gold [game-state pos _]
   (-> game-state
       (clear-tile pos)
       (update-in [:player :score] + 25)
       (add-msg (str "You find 25 gold on the ground. Score!"))))
 
-(defmethod use-tile ::stairs [{p :player :as game-state} _ _]
+(defmethod use-tile :stairs [{p :player :as game-state} _ _]
   (let [next-floor (gen-level 50 50 (random 4 5))]
     (-> game-state
         (assoc :level next-floor)
@@ -173,7 +192,6 @@
         (assoc-in [:level :monsters] (if alive? (conj ms damaged) ms))
         (add-msg (str "The monster " (if alive? (str "takes " d " damage.") "dies.")))
         (update-in [:player :score] + (if alive? 0 (random 25 25))))))
-
 
 (defn monster-at [{{mons :monsters} :level} pos]
   (loop [[{p :pos :as m} & ms] (seq mons)]
@@ -203,7 +221,8 @@
 (defn attack-player [{{l :level h :health :as player} :player :as gs}]
   (if (zero? (rand-int 4)) (add-msg gs "You dodge the monster's attack!")
       (let [dam (random (+ l 3) (+ l 7))
-            next-gs (-> gs (update-in [:player :health] - dam)
+            next-gs (-> gs
+                        (update-in [:player :health] - dam)
                         (add-msg (str "The monster attacks you for " dam " damage!")))]
         (if-not (pos? (- (:health (:player gs)) dam))
           (die (assoc-in next-gs [:player :dead] true))
@@ -214,66 +233,103 @@
         del (if vis (map (comp signum -) pp mp) (rand-nth (vals directions))),
         pos (map + mp del)]
     (cond (= pos pp) (attack-player gs)
-          (pts pos) (-> gs (update-in [:level :monsters] disj mon) (update-in [:level :monsters] conj (assoc mon :pos pos)))
+          (pts pos) (-> gs (update-in [:level :monsters] disj mon)
+                        (update-in [:level :monsters] conj (assoc mon :pos pos)))
           :else gs)))
 
 (defn tick-monsters [{{ms :monsters, pts :points} :level {pp :pos} :player :as gs}] (reduce tick-monster gs ms))
 
 (defn tick [{{dead? :dead} :player :as game-state} input]
-  (cond (not dead?) (-> game-state (tick-player input) autoheal tick-monsters update-vision)
+  (cond (= input [:noop]) game-state
+        (not dead?) (-> game-state (tick-player input) autoheal tick-monsters update-vision)
         (and dead? (= input [:action])) (initialize-gamestate)
         :else game-state))
 
-(def game (atom (initialize-gamestate)))
+
+
+
 
 (def $content ($ :#content))
 
+
 (defpartial canv [] [:canvas#canvas {:width canv-width :height canv-height}])
-(defpartial btn [txt] [:button#button txt])
-(append $content (canv))
+
+;(defpartial msg-log [] [:div#msgs])
+
+(defpartial p-msg [txt col] [:p.msg txt])
+
+;(append $content (canv))
+;(append $content (msg-log))
+
+
+
+(def $msgs ($ :div.msgs))
+
+(def $status ($ :#status))
 
 (def cvs (.get ($ :#canvas) 0))
+
 (def ctx (.getContext cvs "2d"))
 
 (defn- set-fill [ctx col] (set! (.-fillStyle ctx) col))
 
+(defn add-msg
+  ([gs msg] (add-msg gs "white" msg))
+  ([gs col message]
+     (prepend $msgs ($ (p-msg message col)))
+     gs))
+
+(defpartial stat [{h :health s :score lv :level}]
+  [:div
+   [:p.health (str "Health: " h)]
+   [:p.score (str "Score: " s)]
+   [:p.level (str "Level: " lv)]])
+
 (defn draw [{{[px py :as pos] :pos h :health s :score sees :sees, lv :level :as play} :player,
-             {:keys [points width height monsters seen]} :level, msgs :messages}]
+             {:keys [points width height monsters seen tiles]} :level, msgs :messages}]
   (set! (.-font ctx) "12px monospace")
-  (doto ctx (set-fill "black") (.fillRect 0 0 canv-width canv-height))
+  (set! (.-fillStyle ctx) "black")
+  (.fillRect ctx 0 0 canv-width canv-height)
   (let [mpts (set (map :pos monsters))]
-    (loop [yy (dec height)]
-      (when-not (neg? yy)
-        (loop [xx (dec width)]
-          (when-not (neg? xx)
+    (loop [yy 0]
+      (when (< yy height)
+        (loop [xx 0]
+          (when (< xx width)
             (let [p [xx yy]
-                  typ (or (cond (= p pos) :player
-                                (mpts p) :monster
-                                :else (points p))
-                          :wall)
-                  ch (typ char-rep)
-                  co (cond (not (seen p)) "black"
-                           (not (sees p)) (typ mem-color-rep)
-                           :else (typ color-rep))]
-              (doto ctx
-                (set-fill co)
-                (.fillText ch (* xx 11) (* yy 11)))
-              (recur (dec xx)))))
-        (recur (dec yy))))))
+                  typ (name (or (cond (= p pos) :player,
+                                      (mpts p) :monster,
+                                      true (aget (aget tiles yy) xx))
+                                :wall))
+                  ch (aget char-rep typ)
+                  co (cond (not (seen p)) "black",
+                           (not (sees p)) (aget mem-color-rep typ),
+                           true (aget color-rep typ))]
+              (doto ctx (set-fill co) (.fillText ch (* xx 11) (* yy 11)))
+              (recur (inc xx)))))
+        (recur (inc yy)))))
+  (inner $status (stat play)))
 
-(def key-table {[:move :east] #{39}, [:move :west] #{37}, [:move :north] #{38}, [:move :south] #{40}, [:action] #{13}})
+(def key-table
+  (let [action-table
+        {[:move :east] #{39}, [:move :west] #{37},[:move :north] #{38}, [:move :south] #{40}, [:action] #{13}}]
+    (apply merge (for [[act keys] action-table] (zipmap (vec keys) (repeat act))))))
 
-(defn comprehend [code] (first (for [[key codes] key-table :when (codes code)] key)))
+(def game (atom nil))
 
-(bind ($ js/window) :keydown
-      (fn [e] (when-let [input (comprehend (.-keyCode e))]
-                (.preventDefault e)
-                (swap! game tick input)
-                (draw @game))))
+(defn init []
+  (reset! game (initialize-gamestate))
+  (bind ($ js/window) :keydown
+        (fn [e]
+          (. e (preventDefault))
+          (when-let [input (key-table (.-keyCode e))]
+            (swap! game tick input)
+            (draw @game))))
+  (draw @game))
+(init)
 
 ;(.log js/console (time (reduce (fn [game _] (draw game) game) @game (range 100))))
 
-(draw @game)
+
 
 
 
