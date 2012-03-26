@@ -8,7 +8,9 @@
 (def cljs-options {:advanced {:externs ["externs/jquery.js"]}})
 
 (defn -main [& m]
-  (let [mode (keyword (or (first m) :dev)), port (Integer. (get (System/getenv) "PORT" "8090"))]
+  (let [mode :dev ; (keyword (or (first m) :dev)),
+        port (Integer. (or (first m) (get (System/getenv) "PORT" "8090")))
+        ]
     (cljs/start mode cljs-options)
     (server/start port {:mode mode, :ns 'dunjeon-cljs})
     (repl/repl (browser/repl-env))))
