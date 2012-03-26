@@ -1,1 +1,1 @@
-web: lein run -m dunjeon-cljs.core $PORT
+web: lein run -m dunjeon-cljs.server $PORT
