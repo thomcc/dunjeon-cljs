@@ -13,7 +13,8 @@
         ]
     (cljs/start mode cljs-options)
     (server/start port {:mode mode, :ns 'dunjeon-cljs})
-    (repl/repl (browser/repl-env))))
+;    (repl/repl (browser/repl-env))
+    ))
 
 
 
