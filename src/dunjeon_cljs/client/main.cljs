@@ -3,7 +3,7 @@
   (:require [noir.cljs.client.watcher :as watcher]
             [clojure.browser.repl :as repl]
             [crate.core :as crate]
-            [goog.array :as array])
+            [goog.array :as garray])
   (:use [jayq.core :only [$ append bind inner hide find prepend]])
   (:use-macros [crate.macros :only [defpartial]]))
 
@@ -54,8 +54,9 @@
   (and (or (and (>= x0 x1) (<= x0 (+ x1 w1))) (and (>= x1 x0) (<= x1 (+ x0 w0))))
        (or (and (>= y0 y1) (<= y0 (+ y1 h1))) (and (>= y1 y0) (<= y1 (+ y0 h0))))))
 
+(defn array-2d [h] (let [a (array)] (loop [i 0] (when (< i h) (aset a i (array)) (recur (inc i)))) a))
 
-(defn shuffle [v] (doto (to-array v) array/shuffle))
+(defn shuffle [v] (doto (to-array v) garray/shuffle))
 
 (defn empty-map [w h] {:width w, :height h, :rooms #{}})
 
@@ -91,26 +92,31 @@
   (mapcat (fn [[row y]] (map #(vector % y) row))
           (partition 2 (interleave (repeat height (range x (+ x width)))
                                    (range y (+ y height))))))
+
 (defrecord Level [width height seen points tiles])
 
 (defn levelify-map [{:keys [width, height, rooms, paths]}]
-  (let [ps (merge (zipmap (mapcat pointify rooms) (repeat :floor)) (zipmap (apply concat paths) (repeat :floor)))
+  (let [ps (merge (zipmap (mapcat pointify rooms) (repeat :floor))
+                  (zipmap (apply concat paths) (repeat :floor)))
         ary (array)]
     (loop [y 0]
       (when (< y height)
         (let [row (array)]
           (loop [x 0]
             (when (< x width)
-              (let [t (or (ps [x y]) wall)]
+              (let [t (ps [x y])]
                 (aset row x t)
                 (recur (inc x)))))
           (aset ary y row)
           (recur (inc y)))))
-    (Level. width height #{} ps ary)))
+    (Level. width height (array-2d height) ps ary)))
 
 
-(defn place-randomly [level n tile]
-  (reduce (fn [{p :points :as l} t] (assoc-in l [:points ((rand-elt p) 0)] t))
+(defn place-randomly [{tiles :tiles :as level} n tile]
+  (reduce (fn [{p :points :as l} t]
+            (let [[xx yy :as pos] ((rand-elt p) 0)]
+              (aset (aget tiles yy) xx t)
+              (assoc-in l [:points pos] t)))
           level (repeat n tile)))
 
 (defrecord Monster [pos health])
@@ -127,29 +133,63 @@
 (defn gen-level [width height rooms]
   (-> (empty-map width height) (add-rooms rooms) connect-rooms levelify-map finalize))
 
-
 ;; vision
-
-(defn can-see? [{pts :points} source end]
+(defn can-see? [{tiles :tiles} [sx sy :as source] [ex ey :as end]]
   (or (= source end)
-      (let [dest (map #(+ %2 (/ (signum (- % %2)) 2.0)) source end)
-            [distx disty :as dist] (map - dest source)
+      (let [[destx desty] (map #(+ %2 (/ (signum (- %1 %2)) 2.0)) source end)
+            distx (- destx sx),
+            disty (- desty sy),
             length (max (Math/abs distx) (Math/abs disty))
-            delta (map #(/ % length) dist)]
-        (loop [len length, pos source]
+            dx (/ distx length)
+            dy (/ disty length)]
+        (loop [len length, px sx, py sy]
           (or (neg? len)
-              (let [moved (map (comp Math/floor (partial + 0.5)) pos)]
-                (cond (= moved dest) true
-                      (and (not (= moved source)) (not (pts moved))) false
-                      :else (recur (dec len) (map + delta pos)))))))))
+              (let [mx (Math/floor (+ px 0.5)), my (Math/floor (+ py 0.5))]
+                (cond (and (== mx destx) (== my desty)) true,
+                      (and (not (and (== mx sx) (== my sy)))
+                           (nil? (aget (aget tiles my) mx))) false
+                      true (recur (dec len) (+ dx px) (+ dy py)))))))))
 
-(defn update-vision [{{seen :seen :as lvl} :level,{[x y] :pos :as player} :player :as game-state}]
-  (let [visible (for [xx (range -10 10), yy (range -10 10)
-                      :when (and (<= (abssq [xx yy]) 100) (can-see? lvl [x y] [(+ x xx) (+ y yy)]))]
-                  [(+ xx x) (+ yy y)])]
-    (-> game-state
-        (assoc-in [:level :seen] (reduce conj seen visible))
-        (assoc-in [:player :sees] (set visible)))))
+;; (defn can-see? [{pts :points} source end]
+;;   (or (= source end)
+;;       (let [dest (map #(+ %2 (/ (signum (- % %2)) 2.0)) source end)
+;;             [distx disty :as dist] (map - dest source)
+;;             length (max (Math/abs distx) (Math/abs disty))
+;;             delta (map #(/ % length) dist)]
+;;         (loop [len length, pos source]
+;;           (or (neg? len)
+;;               (let [moved (map (comp Math/floor (partial + 0.5)) pos)]
+;;                 (cond (= moved dest) true
+;;                       (and (not (= moved source)) (not (pts moved))) false
+;;                       :else (recur (dec len) (map + delta pos)))))))))
+
+(defn clear-array [a] (garray/forEach a garray/clear))
+
+(defn update-vision
+  [{{seen :seen, w :width, h :height :as lvl} :level, {sees :sees [x y] :pos :as player} :player
+    :as game-state}]
+  (clear-array sees)
+  (loop [yy -10]
+    (when (< yy 10)
+      (loop [xx -10]
+        (when (< xx 10)
+          (let [vis (and (<= (+ (* xx xx) (* yy yy)) 100) (can-see? lvl [x y] [(+ x xx) (+ y yy)]))]
+            (when-not (or (neg? (+ yy y)) (neg? (+ xx x))
+                          (>= (+ y yy) h) (>= (+ x xx) w))
+              (aset (aget sees (+ yy y)) (+ xx x) vis)
+              (aset (aget seen (+ yy y)) (+ xx x) (or (aget (aget seen (+ yy y)) (+ xx x)) vis))))
+          (recur (inc xx))))
+      (recur (inc yy))))
+  game-state)
+;
+;; (defn update-vision [{{seen :seen :as lvl} :level,{[x y] :pos :as player} :player :as game-state}]
+;;   (let [visible (for [xx (range -10 10), yy (range -10 10)
+;;                       :when (and (<= (abssq [xx yy]) 100)
+;;                                  (can-see? lvl [x y] [(+ x xx) (+ y yy)]))]
+;;                   [(+ xx x) (+ yy y)])]
+;;     (-> game-state
+;;         (assoc-in [:level :seen] (reduce conj seen visible))
+;;         (assoc-in [:player :sees] (set visible)))))
 
 (defrecord GameState [level player messages])
 
@@ -157,11 +197,14 @@
 
 (defn initialize-gamestate []
   (let [level (gen-level game-width game-height (random 5 4))]
-    (-> (GameState. level (Player. ((rand-elt (:points level)) 0), 50, #{} 0 0 false) ())
+    (-> (GameState. level (Player. ((rand-elt (:points level)) 0), 50, (array-2d 50) 0 0 false) ())
         update-vision
         (add-msg "(entering (dungeon))")
         (add-msg "Entered level 0."))))
 
+(defn clear-tile [{{pts :points tiles :tiles} :level :as gs} [x y :as pos]]
+  (aset (aget tiles y) x :floor)
+  (assoc-in gs [:level :points pos] :floor))
 (defmulti use-tile (fn [gs pos item] item))
 (defmethod use-tile :default [gs _ _] gs)
 (defmethod use-tile :floor [gs _ _] gs)
@@ -301,8 +344,8 @@
                                       true (aget (aget tiles yy) xx))
                                 :wall))
                   ch (aget char-rep typ)
-                  co (cond (not (seen p)) "black",
-                           (not (sees p)) (aget mem-color-rep typ),
+                  co (cond (not (aget (aget seen yy) xx)) "black",
+                           (not (aget (aget sees yy) xx)) (aget mem-color-rep typ),
                            true (aget color-rep typ))]
               (doto ctx (set-fill co) (.fillText ch (* xx 11) (* yy 11)))
               (recur (inc xx)))))
@@ -325,6 +368,7 @@
             (swap! game tick input)
             (draw @game))))
   (draw @game))
+
 (init)
 
 ;(.log js/console (time (reduce (fn [game _] (draw game) game) @game (range 100))))
