@@ -1,6 +1,6 @@
 # dunjeon-cljs
 
-A website written with Noir and ClojureScript.
+ClojureScript port of dunjeon
 
 ## Usage
 
@@ -11,7 +11,7 @@ lein run
 
 ## License
 
-Copyright (C) 2012 FIXME
+Copyright (C) 2012 Thom Chiovoloni
 
 Distributed under the Eclipse Public License, the same as Clojure.
 

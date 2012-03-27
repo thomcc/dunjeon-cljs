@@ -1,22 +1,11 @@
 (ns dunjeon-cljs.client.main
   (:refer-clojure :exclude [find])
-  (:require [noir.cljs.client.watcher :as watcher]
-            [clojure.browser.repl :as repl]
-            [crate.core :as crate]
-            [goog.array :as garray])
+  (:require [goog.array :as garray] [crate.core :as crate])
   (:use [jayq.core :only [$ append bind inner hide find prepend]])
   (:use-macros [crate.macros :only [defpartial]]))
 
-;;************************************************
-;; Dev stuff
-;;************************************************
 (set! *print-fn* (fn [& args] (dorun (map #(.log js/console %) args))))
-;(watcher/init)
-;(repl/connect "http://localhost:9000/repl")
 
-;;************************************************
-;; Code
-;;************************************************
 
 (declare add-msg)
 
@@ -37,11 +26,6 @@
 
 (def color-rep (Tile-lookup. "white" "gray" "orange" "yellow" "magenta" "#0f0" "red"))
 (def mem-color-rep (Tile-lookup. "gray" "#333" "#8c4618" "#9c9c618" "#640064" "#0f0" "#800000"))
-;; (def char-rep {:floor ".", nil "#", :stairs ">", :gold "$", :booze "!",:player "@", :monster "m"})
-;; (def color-rep {:floor "white", nil "gray", :stairs "orange", :gold "yellow", :booze "magenta", :monster "red",
-;;                 :player "green"})
-;; (def mem-color-rep {:floor "gray", :stairs "#8c4618", :booze "#640064" nil "#333", :gold "#9c9618", :monster "#800000"
-;;                     :player "#408000"})
 
 (def auto-use #{:gold, :booze})
 
@@ -55,9 +39,7 @@
        (or (and (>= y0 y1) (<= y0 (+ y1 h1))) (and (>= y1 y0) (<= y1 (+ y0 h0))))))
 
 (defn array-2d [h] (let [a (array)] (loop [i 0] (when (< i h) (aset a i (array)) (recur (inc i)))) a))
-
 (defn shuffle [v] (doto (to-array v) garray/shuffle))
-
 (defn empty-map [w h] {:width w, :height h, :rooms #{}})
 
 (defn room [{:keys [width height]}]
@@ -128,7 +110,8 @@
 
 
 (defn finalize [level]
-  (add-monsters (reduce (fn [lvl [item, num-fn]] (place-randomly lvl (num-fn) item)) level distributions) (random 5 5)))
+  (add-monsters (reduce (fn [lvl [item, num-fn]] (place-randomly lvl (num-fn) item)) level distributions)
+                (random 5 5)))
 
 (defn gen-level [width height rooms]
   (-> (empty-map width height) (add-rooms rooms) connect-rooms levelify-map finalize))
@@ -150,19 +133,6 @@
                            (nil? (aget (aget tiles my) mx))) false
                       true (recur (dec len) (+ dx px) (+ dy py)))))))))
 
-;; (defn can-see? [{pts :points} source end]
-;;   (or (= source end)
-;;       (let [dest (map #(+ %2 (/ (signum (- % %2)) 2.0)) source end)
-;;             [distx disty :as dist] (map - dest source)
-;;             length (max (Math/abs distx) (Math/abs disty))
-;;             delta (map #(/ % length) dist)]
-;;         (loop [len length, pos source]
-;;           (or (neg? len)
-;;               (let [moved (map (comp Math/floor (partial + 0.5)) pos)]
-;;                 (cond (= moved dest) true
-;;                       (and (not (= moved source)) (not (pts moved))) false
-;;                       :else (recur (dec len) (map + delta pos)))))))))
-
 (defn clear-array [a] (garray/forEach a garray/clear))
 
 (defn update-vision
@@ -181,15 +151,6 @@
           (recur (inc xx))))
       (recur (inc yy))))
   game-state)
-;
-;; (defn update-vision [{{seen :seen :as lvl} :level,{[x y] :pos :as player} :player :as game-state}]
-;;   (let [visible (for [xx (range -10 10), yy (range -10 10)
-;;                       :when (and (<= (abssq [xx yy]) 100)
-;;                                  (can-see? lvl [x y] [(+ x xx) (+ y yy)]))]
-;;                   [(+ xx x) (+ yy y)])]
-;;     (-> game-state
-;;         (assoc-in [:level :seen] (reduce conj seen visible))
-;;         (assoc-in [:player :sees] (set visible)))))
 
 (defrecord GameState [level player messages])
 
@@ -370,12 +331,6 @@
   (draw @game))
 
 (init)
-
-;(.log js/console (time (reduce (fn [game _] (draw game) game) @game (range 100))))
-
-
-
-
 
 
 
